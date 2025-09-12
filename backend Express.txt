@@ -1,0 +1,136 @@
+const express = require('express');
+const mysql = require('mysql2/promise');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const cors = require('cors');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const JWT_SECRET = 'your_jwt_secret';
+
+// MySQL connection pool
+const pool = mysql.createPool({
+  host: 'localhost',
+  user: 'root',
+  password: 'your_mysql_password',
+  database: 'store_rating',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+});
+
+// Middleware to authenticate JWT and set req.user
+const authenticate = async (req, res, next) => {
+  const token = req.headers['authorization']?.split(' ')[1];
+  if (!token) return res.status(401).json({ message: 'Unauthorized' });
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch {
+    res.status(401).json({ message: 'Invalid token' });
+  }
+};
+
+// Simple role check middleware
+const authorize = (roles) => (req, res, next) => {
+  if (!roles.includes(req.user.role)) return res.status(403).json({ message: 'Forbidden' });
+  next();
+};
+
+// Routes
+
+// Register normal user
+app.post('/api/register', async (req, res) => {
+  const { name, email, password, address } = req.body;
+  if (!name || !email || !password) return res.status(400).json({ message: 'Missing fields' });
+
+  // Basic validation (you can improve)
+  if (name.length < 20 || name.length > 60) return res.status(400).json({ message: 'Name length invalid' });
+  if (password.length < 8) return res.status(400).json({ message: 'Password too short' });
+
+  const hashed = await bcrypt.hash(password, 10);
+  try {
+    const [rows] = await pool.query('SELECT id FROM users WHERE email = ?', [email]);
+    if (rows.length > 0) return res.status(400).json({ message: 'Email already exists' });
+
+    await pool.query('INSERT INTO users (name, email, password_hash, address, role) VALUES (?, ?, ?, ?, ?)', 
+      [name, email, hashed, address || '', 'normal']);
+    res.json({ message: 'User  registered' });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Login
+app.post('/api/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ message: 'Missing fields' });
+
+  try {
+    const [rows] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
+    if (rows.length === 0) return res.status(400).json({ message: 'Invalid credentials' });
+
+    const user = rows[0];
+    const valid = await bcrypt.compare(password, user.password_hash);
+    if (!valid) return res.status(400).json({ message: 'Invalid credentials' });
+
+    const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '1h' });
+    res.json({ token, role: user.role, name: user.name });
+  } catch {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Get all stores with average rating
+app.get('/api/stores', authenticate, async (req, res) => {
+  try {
+    const [stores] = await pool.query(`
+      SELECT s.id, s.name, s.address, IFNULL(AVG(r.rating), 0) as avg_rating
+      FROM stores s
+      LEFT JOIN ratings r ON s.id = r.store_id
+      GROUP BY s.id
+    `);
+
+    // If user is normal user, get their submitted ratings
+    if (req.user.role === 'normal') {
+      const [userRatings] = await pool.query('SELECT store_id, rating FROM ratings WHERE user_id = ?', [req.user.id]);
+      const ratingMap = {};
+      userRatings.forEach(r => ratingMap[r.store_id] = r.rating);
+      stores.forEach(store => store.user_rating = ratingMap[store.id] || null);
+    }
+
+    res.json(stores);
+  } catch {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Submit or update rating (normal users only)
+app.post('/api/stores/:id/rate', authenticate, authorize(['normal']), async (req, res) => {
+  const storeId = req.params.id;
+  const { rating } = req.body;
+  if (!rating || rating < 1 || rating > 5) return res.status(400).json({ message: 'Invalid rating' });
+
+  try {
+    // Check if rating exists
+    const [rows] = await pool.query('SELECT id FROM ratings WHERE user_id = ? AND store_id = ?', [req.user.id, storeId]);
+    if (rows.length > 0) {
+      // Update
+      await pool.query('UPDATE ratings SET rating = ? WHERE id = ?', [rating, rows[0].id]);
+    } else {
+      // Insert
+      await pool.query('INSERT INTO ratings (user_id, store_id, rating) VALUES (?, ?, ?)', [req.user.id, storeId, rating]);
+    }
+    res.json({ message: 'Rating saved' });
+  } catch {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Start server
+app.listen(4000, () => {
+  console.log('Server running on http://localhost:4000');
+});
