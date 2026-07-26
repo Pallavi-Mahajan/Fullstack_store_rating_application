@@ -193,7 +193,6 @@ Application runs on:
 ```
 http://localhost:3000
 ```
-
 ---
 
 ## 🔗 API Endpoints
@@ -262,11 +261,5 @@ Include the token in every protected request.
 - Password Reset
 - Email Verification
 - Docker Deployment
-
----
-
-## 👩‍💻 Author
-
-  **Pallavi Mahajan**
 
 ---
